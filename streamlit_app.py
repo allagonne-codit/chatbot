@@ -1,56 +1,124 @@
+
 import streamlit as st
-from openai import OpenAI
+from langchain_community.document_loaders import PDFPlumberLoader
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_community.llms import Ollama
+from langchain.prompts import PromptTemplate
+from langchain.chains.llm import LLMChain
+from langchain.chains.combine_documents.stuff import StuffDocumentsChain
+from langchain.chains import RetrievalQA
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
-)
+# color palette
+primary_color = "#1E90FF"
+secondary_color = "#FF6347"
+background_color = "#F5F5F5"
+text_color = "#4561e9"
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
+# Custom CSS
+st.markdown(f"""
+    <style>
+    .stApp {{
+        background-color: {background_color};
+        color: {text_color};
+    }}
+    .stButton>button {{
+        background-color: {primary_color};
+        color: white;
+        border-radius: 5px;
+        border: none;
+        padding: 10px 20px;
+        font-size: 16px;
+    }}
+    .stTextInput>div>div>input {{
+        border: 2px solid {primary_color};
+        border-radius: 5px;
+        padding: 10px;
+        font-size: 16px;
+    }}
+    .stFileUploader>div>div>div>button {{
+        background-color: {secondary_color};
+        color: white;
+        border-radius: 5px;
+        border: none;
+        padding: 10px 20px;
+        font-size: 16px;
+    }}
+    </style>
+""", unsafe_allow_html=True)
+
+# Streamlit app title
+st.title("Build a RAG System with DeepSeek R1 & Ollama")
+
+# Load the PDF
+uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
+
+if uploaded_file is not None:
+    # Save the uploaded file to a temporary location
+    with open("temp.pdf", "wb") as f:
+        f.write(uploaded_file.getvalue())
+
+    # Load the PDF
+    loader = PDFPlumberLoader("temp.pdf")
+    docs = loader.load()
+
+    # Split into chunks
+    text_splitter = SemanticChunker(HuggingFaceEmbeddings())
+    documents = text_splitter.split_documents(docs)
+
+    # Instantiate the embedding model
+    embedder = HuggingFaceEmbeddings()
+
+    # Create the vector store and fill it with embeddings
+    vector = FAISS.from_documents(documents, embedder)
+    retriever = vector.as_retriever(search_type="similarity", search_kwargs={"k": 3})
+
+    # Define llm
+    llm = Ollama(model="llama3.1")
+
+    # Define the prompt
+    prompt = """
+    1. Use the following pieces of context to answer the question at the end.
+    2. If you don't know the answer, just say that "I don't know" but don't make up an answer on your own.\n
+    3. Keep the answer crisp and limited to 3,4 sentences.
+    Context: {context}
+    Question: {question}
+    Helpful Answer:"""
+
+    QA_CHAIN_PROMPT = PromptTemplate.from_template(prompt)
+
+    llm_chain = LLMChain(
+        llm=llm,
+        prompt=QA_CHAIN_PROMPT,
+        callbacks=None,
+        verbose=True)
+
+    document_prompt = PromptTemplate(
+        input_variables=["page_content", "source"],
+        template="Context:\ncontent:{page_content}\nsource:{source}",
+    )
+
+    combine_documents_chain = StuffDocumentsChain(
+        llm_chain=llm_chain,
+        document_variable_name="context",
+        document_prompt=document_prompt,
+        callbacks=None)
+
+    qa = RetrievalQA(
+        combine_documents_chain=combine_documents_chain,
+        verbose=True,
+        retriever=retriever,
+        return_source_documents=True)
+
+    # User input
+    user_input = st.text_input("Ask a question related to the PDF :")
+
+    # Process user input
+    if user_input:
+        with st.spinner("Processing..."):
+            response = qa(user_input)["result"]
+            st.write("Response:")
+            st.write(response)
 else:
-
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
-
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
-
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
-
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+    st.write("Please upload a PDF file to proceed.")
